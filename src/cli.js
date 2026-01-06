@@ -341,6 +341,7 @@ async function main() {
       console.log(`Auto-run:    ${config.autoInvokeClaude ? 'enabled' : 'disabled'}`);
       if (provider === 'codex') {
         console.log(`Codex model: ${config.codexModel || '(default)'}`);
+        console.log(`Codex reasoning: ${config.codexReasoningEffort || '(default)'}`);
       } else {
         console.log(`Claude model:${config.claudeModel ? ` ${config.claudeModel}` : ' (default)'}`);
       }

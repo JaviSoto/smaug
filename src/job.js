@@ -18,6 +18,8 @@ import path from 'path';
 import os from 'os';
 import { fetchAndPrepareBookmarks } from './processor.js';
 import { loadConfig } from './config.js';
+import { callCodexJson } from './codex_api.js';
+import { applyArchiveUpdates, formatArchiveEntry, loadTextIfExists, writeTextAtomic } from './archive.js';
 
 const JOB_NAME = 'smaug';
 const LOCK_FILE = path.join(os.tmpdir(), 'smaug.lock');
@@ -605,50 +607,229 @@ ${tokenDisplay}
 // ============================================================================
 
 async function invokeCodex(config, bookmarkCount) {
-  const codexPath = 'codex';
-
-  // Best-effort check so failures are clearer.
+  const pendingPath = config.pendingFile || './.state/pending-bookmarks.json';
+  let pendingData;
   try {
-    execSync('codex --version', { stdio: 'ignore' });
+    pendingData = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
   } catch (e) {
-    return { success: false, error: `codex CLI not found or not runnable: ${e.message}` };
+    return { success: false, error: `Could not read pending file: ${e.message}` };
   }
 
-  const pendingPath = config.pendingFile || './.state/pending-bookmarks.json';
+  const bookmarks = (pendingData.bookmarks || []).slice(0, bookmarkCount);
+  const byTweetUrl = new Map(bookmarks.map(b => [b.tweetUrl, b]));
 
-  const prompt = [
-    `Process the ${bookmarkCount} bookmark(s) in ${pendingPath}.`,
-    `Read ./.codex/commands/process-bookmarks.md first, then apply it.`,
-    `Important: do not modify Smaug source code; only write to the archive/knowledge paths from ./smaug.config.json.`
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['entries'],
+    properties: {
+      entries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['tweet_url', 'date', 'author_username', 'title', 'excerpt', 'tags', 'expanded_links', 'notes'],
+          properties: {
+            tweet_url: { type: 'string' },
+            date: { type: 'string' },
+            author_username: { type: 'string' },
+            title: { type: 'string' },
+            excerpt: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+            expanded_links: { type: 'array', items: { type: 'string' } },
+            notes: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['category', 'title', 'source_url', 'summary_bullets', 'tags'],
+                properties: {
+                  category: { type: 'string', enum: ['github', 'article'] },
+                  title: { type: 'string' },
+                  source_url: { type: 'string' },
+                  summary_bullets: { type: 'array', items: { type: 'string' } },
+                  tags: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const payloadForModel = bookmarks.map((b) => ({
+    tweet_url: b.tweetUrl,
+    tweet_id: b.id,
+    date: b.date,
+    author_username: b.author,
+    author_name: b.authorName,
+    text: b.text,
+    links: (b.links || []).map((l) => ({
+      expanded: l.expanded,
+      type: l.type,
+      content: l.content
+        ? (l.type === 'github'
+          ? {
+            name: l.content.name,
+            fullName: l.content.fullName,
+            description: l.content.description,
+            stars: l.content.stars,
+            language: l.content.language,
+            topics: l.content.topics,
+            readme: (l.content.readme || '').slice(0, 2500),
+          }
+          : { text: (l.content.text || '').slice(0, 2500), paywalled: l.content.paywalled })
+        : null,
+    })),
+    reply_context: b.replyContext || null,
+    quote_context: b.quoteContext || null,
+  }));
+
+  const inputText = [
+    'You are Smaug, a Twitter/X bookmarks archivist.',
+    '',
+    'Return STRICT JSON matching the provided schema. No markdown, no prose.',
+    'For each input bookmark, produce one entry. Keep titles short (<= 80 chars) and tags <= 8.',
+    'Only create notes for GitHub repos and articles; omit notes otherwise.',
+    '',
+    'Input bookmarks JSON:',
+    JSON.stringify(payloadForModel),
   ].join('\n');
 
-  return new Promise((resolve) => {
-    const args = [
-      'exec',
-      '--skip-git-repo-check',
-      ...(config.codexModel ? ['--model', config.codexModel] : []),
-      '--',
-      prompt
-    ];
-
-    const proc = spawn(codexPath, args, {
-      cwd: config.projectRoot || process.cwd(),
-      env: { ...process.env },
-      stdio: ['inherit', 'inherit', 'inherit']
+  let modelResult;
+  try {
+    console.log(`[${JOB_NAME}] OpenAI: requesting ${bookmarkCount} bookmark summary via model ${config.codexModel || 'codex-mini-latest'} (${config.codexReasoningEffort || 'default'} reasoning)`);
+    modelResult = await callCodexJson({
+      model: config.codexModel || 'codex-mini-latest',
+      reasoningEffort: config.codexReasoningEffort,
+      schema,
+      inputText,
+      maxOutputTokens: Math.min(12000, 1200 * Math.max(1, bookmarkCount)),
     });
+    console.log(`[${JOB_NAME}] OpenAI: response received`);
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve({ success: true });
-      } else {
-        resolve({ success: false, error: `codex exited with code ${code}` });
+  const entries = modelResult.parsed?.entries;
+  if (!Array.isArray(entries)) {
+    return { success: false, error: 'Model output missing entries[]' };
+  }
+
+  // Load archive once for de-dupe checks.
+  const archivePath = config.archiveFile;
+  const existingArchive = loadTextIfExists(archivePath);
+  const existingText = existingArchive;
+
+  const grouped = new Map(); // date -> { date, bodyParts: [] }
+
+  const knowledgeWrites = [];
+  const filedByTweet = new Map(); // tweet_url -> [paths]
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  const slugify = (s) => String(s || 'note')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 80) || 'note';
+
+  for (const entry of entries) {
+    const tweetUrl = String(entry.tweet_url || '').trim();
+    if (!tweetUrl) return { success: false, error: 'Model entry missing tweet_url' };
+    const src = byTweetUrl.get(tweetUrl);
+    if (!src) {
+      return { success: false, error: `Model returned unknown tweet_url: ${tweetUrl}` };
+    }
+
+    const tweetId = src.id || (tweetUrl.match(/status\/(\d+)/)?.[1] ?? 'unknown');
+
+    // Build knowledge files first (optional)
+    const filedPaths = [];
+    for (const note of entry.notes || []) {
+      const category = note.category;
+      const categoryCfg = config.categories?.[category];
+      if (!categoryCfg || categoryCfg.action !== 'file' || !categoryCfg.folder) continue;
+
+      const folder = categoryCfg.folder;
+      const filename = `${slugify(note.title)}-${tweetId}.md`;
+      const filePath = path.join(folder, filename);
+      if (!fs.existsSync(filePath)) {
+        const tags = Array.isArray(note.tags) ? note.tags.filter(Boolean).slice(0, 20) : [];
+        const frontmatter = [
+          '---',
+          `title: "${String(note.title || '').replace(/"/g, '\\"')}"`,
+          `type: ${categoryCfg.template || category}`,
+          `date_added: ${todayIso}`,
+          `source: "${String(note.source_url || '').replace(/"/g, '\\"')}"`,
+          `tags: [${tags.map(t => String(t).replace(/[^a-z0-9_-]/gi, '')).filter(Boolean).join(', ')}]`,
+          `via: "Twitter bookmark from @${src.author || 'unknown'}"`,
+          '---',
+          '',
+        ].join('\n');
+
+        const bullets = Array.isArray(note.summary_bullets) ? note.summary_bullets.slice(0, 10) : [];
+        const body = [
+          ...bullets.map(b => `- ${String(b).trim()}`),
+          '',
+          '## Links',
+          '',
+          `- ${note.source_url}`,
+          `- ${tweetUrl}`,
+          '',
+        ].join('\n');
+
+        knowledgeWrites.push({ filePath, content: frontmatter + body });
       }
-    });
+      filedPaths.push(filePath);
+    }
 
-    proc.on('error', (err) => {
-      resolve({ success: false, error: err.message });
-    });
-  });
+    filedByTweet.set(tweetUrl, filedPaths);
+
+    // De-dupe against existing archive.
+    if (existingText.includes(`- Tweet URL: ${tweetUrl}`)) {
+      continue;
+    }
+
+    const date = entry.date || src.date;
+    const group = grouped.get(date) || { date, bodyParts: [] };
+    group.bodyParts.push(formatArchiveEntry({
+      tweet_url: tweetUrl,
+      date,
+      author_username: entry.author_username || src.author,
+      title: entry.title,
+      excerpt: entry.excerpt || src.text,
+      tags: entry.tags,
+      expanded_links: entry.expanded_links,
+    }, filedPaths.map(p => path.relative(path.dirname(archivePath), p))));
+    grouped.set(date, group);
+  }
+
+  // Write knowledge files (best-effort, but fail fast on IO issues).
+  try {
+    for (const w of knowledgeWrites) {
+      writeTextAtomic(w.filePath, w.content);
+    }
+  } catch (e) {
+    return { success: false, error: `Failed writing knowledge files: ${e.message}` };
+  }
+
+  const groups = [...grouped.values()]
+    .map(g => ({ date: g.date, body: g.bodyParts.join('') }))
+    // Newest-first: relying on date strings is lossy; keep input order by default.
+    ;
+
+  if (groups.length) {
+    const updated = applyArchiveUpdates(existingArchive, groups);
+    try {
+      writeTextAtomic(archivePath, updated);
+    } catch (e) {
+      return { success: false, error: `Failed writing archive: ${e.message}` };
+    }
+  }
+
+  return { success: true, tokenUsage: modelResult.usage };
 }
 
 function resolveAssistantProvider(config) {
@@ -745,6 +926,23 @@ export async function run(options = {}) {
     return { success: true, skipped: true };
   }
 
+  const fullFile = config.pendingFile + '.full';
+  let signalCleanup = null;
+  const restoreFullPendingForRetry = (reason) => {
+    try {
+      if (!fs.existsSync(fullFile)) return;
+      fs.copyFileSync(fullFile, config.pendingFile);
+      fs.unlinkSync(fullFile);
+      if (reason) {
+        console.log(`[${now}] Restored full pending file (${reason})`);
+      } else {
+        console.log(`[${now}] Restored full pending file`);
+      }
+    } catch (e) {
+      console.error(`[${now}] Failed to restore full pending file:`, e.message);
+    }
+  };
+
   try {
     // Check for existing pending bookmarks first
     let pendingData = null;
@@ -762,11 +960,24 @@ export async function run(options = {}) {
           pendingData.bookmarks = pendingData.bookmarks.slice(0, limit);
           bookmarkCount = limit;
           // Write limited subset back (temporarily)
-          fs.writeFileSync(config.pendingFile + '.full', JSON.stringify(
+          fs.writeFileSync(fullFile, JSON.stringify(
             JSON.parse(fs.readFileSync(config.pendingFile, 'utf8')), null, 2
           ));
           pendingData.count = bookmarkCount;
           fs.writeFileSync(config.pendingFile, JSON.stringify(pendingData, null, 2));
+
+          // If the process is interrupted mid-run, restore the full pending list
+          // so we don't silently "lose" items.
+          const onInterrupt = (sig) => {
+            restoreFullPendingForRetry(`interrupted by ${sig}`);
+            process.exit(sig === 'SIGINT' ? 130 : 143);
+          };
+          process.on('SIGINT', onInterrupt);
+          process.on('SIGTERM', onInterrupt);
+          signalCleanup = () => {
+            process.off('SIGINT', onInterrupt);
+            process.off('SIGTERM', onInterrupt);
+          };
         }
       } catch (e) {
         // Invalid pending file, will fetch fresh
@@ -817,7 +1028,6 @@ export async function run(options = {}) {
 
         // Remove processed IDs from pending file
         // If we used --limit, restore from .full file first
-        const fullFile = config.pendingFile + '.full';
         let sourceData;
         if (fs.existsSync(fullFile)) {
           sourceData = JSON.parse(fs.readFileSync(fullFile, 'utf8'));
@@ -857,12 +1067,7 @@ export async function run(options = {}) {
 
       } else {
         // Claude failed - restore full pending file for retry
-        const fullFile = config.pendingFile + '.full';
-        if (fs.existsSync(fullFile)) {
-          fs.copyFileSync(fullFile, config.pendingFile);
-          fs.unlinkSync(fullFile);
-          console.log(`[${now}] Restored full pending file for retry`);
-        }
+        restoreFullPendingForRetry('for retry');
 
         console.error(`[${now}] Assistant failed:`, assistantResult.error);
 
@@ -886,6 +1091,9 @@ export async function run(options = {}) {
         `[${now}] Auto-invoke disabled. Run 'smaug process' to prepare pending bookmarks, then invoke Claude Code/Codex manually.`
       );
 
+      // If we used --limit, restore the full pending list before returning.
+      restoreFullPendingForRetry('auto-invoke disabled');
+
       return {
         success: true,
         count: bookmarkCount,
@@ -896,6 +1104,8 @@ export async function run(options = {}) {
 
   } catch (error) {
     console.error(`[${now}] Job error:`, error.message);
+
+    restoreFullPendingForRetry('after error');
 
     await notify(
       config,
@@ -910,6 +1120,9 @@ export async function run(options = {}) {
       duration: Date.now() - startTime
     };
   } finally {
+    if (signalCleanup) {
+      signalCleanup();
+    }
     releaseLock();
   }
 }

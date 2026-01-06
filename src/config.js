@@ -120,8 +120,12 @@ const DEFAULT_CONFIG = {
   // Claude invocation timeout in ms (default 15 min)
   claudeTimeout: 900000,
 
-  // Codex model to use (optional; uses Codex CLI default if unset)
-  codexModel: null,
+  // Codex model to use (OpenAI API model id).
+  // NOTE: Codex "mini" models support reasoning effort values low|medium|high.
+  codexModel: 'codex-mini-latest',
+
+  // Codex reasoning effort (low|medium|high). Lowest supported is "low".
+  codexReasoningEffort: 'low',
 
   // Project root for Claude Code invocation
   projectRoot: null,
@@ -202,6 +206,9 @@ export function loadConfig(configPath) {
   }
   if (process.env.CODEX_MODEL) {
     config.codexModel = process.env.CODEX_MODEL;
+  }
+  if (process.env.CODEX_REASONING_EFFORT) {
+    config.codexReasoningEffort = process.env.CODEX_REASONING_EFFORT;
   }
   if (process.env.ARCHIVE_FILE) {
     config.archiveFile = process.env.ARCHIVE_FILE;
