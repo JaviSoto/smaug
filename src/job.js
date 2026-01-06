@@ -127,6 +127,7 @@ async function invokeClaudeCode(config, bookmarkCount, options = {}) {
   await showDragonReveal(bookmarkCount);
 
   return new Promise((resolve) => {
+    const pendingPath = config.pendingFile || './.state/pending-bookmarks.json';
     const args = [
       '--print',
       '--verbose',
@@ -134,7 +135,7 @@ async function invokeClaudeCode(config, bookmarkCount, options = {}) {
       '--model', model,
       '--allowedTools', allowedTools,
       '--',
-      `Process the ${bookmarkCount} bookmark(s) in ./.state/pending-bookmarks.json following the instructions in ./.claude/commands/process-bookmarks.md. Read that file first, then process each bookmark.`
+      `Process the ${bookmarkCount} bookmark(s) in ${pendingPath} following the instructions in ./.claude/commands/process-bookmarks.md. Read that file first, then process each bookmark.`
     ];
 
     // Ensure PATH includes common node locations for the claude shebang
@@ -600,6 +601,62 @@ ${tokenDisplay}
 }
 
 // ============================================================================
+// Codex Invocation (OpenAI Codex CLI)
+// ============================================================================
+
+async function invokeCodex(config, bookmarkCount) {
+  const codexPath = 'codex';
+
+  // Best-effort check so failures are clearer.
+  try {
+    execSync('codex --version', { stdio: 'ignore' });
+  } catch (e) {
+    return { success: false, error: `codex CLI not found or not runnable: ${e.message}` };
+  }
+
+  const pendingPath = config.pendingFile || './.state/pending-bookmarks.json';
+
+  const prompt = [
+    `Process the ${bookmarkCount} bookmark(s) in ${pendingPath}.`,
+    `Read ./.codex/commands/process-bookmarks.md first, then apply it.`,
+    `Important: do not modify Smaug source code; only write to the archive/knowledge paths from ./smaug.config.json.`
+  ].join('\n');
+
+  return new Promise((resolve) => {
+    const args = [
+      'exec',
+      '--skip-git-repo-check',
+      '--',
+      prompt
+    ];
+
+    const proc = spawn(codexPath, args, {
+      cwd: config.projectRoot || process.cwd(),
+      env: { ...process.env },
+      stdio: ['inherit', 'inherit', 'inherit']
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve({ success: true });
+      } else {
+        resolve({ success: false, error: `codex exited with code ${code}` });
+      }
+    });
+
+    proc.on('error', (err) => {
+      resolve({ success: false, error: err.message });
+    });
+  });
+}
+
+function resolveAssistantProvider(config) {
+  const provider = (config.assistantProvider || 'claude').toLowerCase();
+  if (provider === 'codex') return 'codex';
+  return 'claude';
+}
+
+// ============================================================================
 // Webhook Notifications (Optional)
 // ============================================================================
 
@@ -734,15 +791,16 @@ export async function run(options = {}) {
     // Track IDs we're about to process
     const idsToProcess = pendingData.bookmarks.map(b => b.id);
 
-    // Phase 2: Claude Code analysis (if enabled)
+    // Phase 2: Assistant analysis (if enabled)
     if (config.autoInvokeClaude !== false) {
-      console.log(`[${now}] Phase 2: Invoking Claude Code for analysis...`);
+      const provider = resolveAssistantProvider(config);
+      console.log(`[${now}] Phase 2: Invoking assistant (${provider}) for analysis...`);
 
-      const claudeResult = await invokeClaudeCode(config, bookmarkCount, {
-        trackTokens: options.trackTokens
-      });
+      const assistantResult = provider === 'codex'
+        ? await invokeCodex(config, bookmarkCount)
+        : await invokeClaudeCode(config, bookmarkCount, { trackTokens: options.trackTokens });
 
-      if (claudeResult.success) {
+      if (assistantResult.success) {
         console.log(`[${now}] Analysis complete`);
 
         // Remove processed IDs from pending file
@@ -781,8 +839,8 @@ export async function run(options = {}) {
           success: true,
           count: bookmarkCount,
           duration: Date.now() - startTime,
-          output: claudeResult.output,
-          tokenUsage: claudeResult.tokenUsage
+          output: assistantResult.output,
+          tokenUsage: assistantResult.tokenUsage
         };
 
       } else {
@@ -794,12 +852,12 @@ export async function run(options = {}) {
           console.log(`[${now}] Restored full pending file for retry`);
         }
 
-        console.error(`[${now}] Claude Code failed:`, claudeResult.error);
+        console.error(`[${now}] Assistant failed:`, assistantResult.error);
 
         await notify(
           config,
           'Bookmark Processing Failed',
-          `Prepared ${bookmarkCount} bookmarks but analysis failed:\n${claudeResult.error}`,
+          `Prepared ${bookmarkCount} bookmarks but analysis failed:\n${assistantResult.error}`,
           false
         );
 
@@ -807,12 +865,12 @@ export async function run(options = {}) {
           success: false,
           count: bookmarkCount,
           duration: Date.now() - startTime,
-          error: claudeResult.error
+          error: assistantResult.error
         };
       }
     } else {
       // Auto-invoke disabled - just fetch
-      console.log(`[${now}] Claude auto-invoke disabled. Run 'smaug process' or /process-bookmarks manually.`);
+      console.log(`[${now}] Assistant auto-invoke disabled. Run 'smaug process' (and invoke your assistant manually).`);
 
       return {
         success: true,

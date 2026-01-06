@@ -304,6 +304,7 @@ Example `smaug.config.json`:
 
 ```json
 {
+  "assistantProvider": "claude",
   "source": "bookmarks",
   "archiveFile": "./bookmarks.md",
   "pendingFile": "./.state/pending-bookmarks.json",
@@ -328,13 +329,14 @@ Example `smaug.config.json`:
 | `includeMedia` | `false` | **EXPERIMENTAL**: Include media attachments (photos, videos, GIFs) |
 | `archiveFile` | `./bookmarks.md` | Main archive file |
 | `timezone` | `America/New_York` | For date formatting |
+| `assistantProvider` | `claude` | Assistant backend: `claude` (default) or `codex` |
 | `autoInvokeClaude` | `true` | Auto-run Claude Code for analysis |
 | `claudeModel` | `sonnet` | Model to use (`sonnet`, `haiku`, or `opus`) |
 | `claudeTimeout` | `900000` | Max processing time (15 min) |
 | `parallelThreshold` | `8` | Min bookmarks before parallel processing kicks in |
 | `webhookUrl` | `null` | Discord/Slack webhook for notifications |
 
-Environment variables also work: `AUTH_TOKEN`, `CT0`, `SOURCE`, `INCLUDE_MEDIA`, `ARCHIVE_FILE`, `TIMEZONE`, `CLAUDE_MODEL`, etc.
+Environment variables also work: `ASSISTANT_PROVIDER`, `AUTH_TOKEN`, `CT0`, `SOURCE`, `INCLUDE_MEDIA`, `ARCHIVE_FILE`, `TIMEZONE`, `CLAUDE_MODEL`, etc.
 
 ### Experimental: Media Attachments
 

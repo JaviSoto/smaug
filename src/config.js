@@ -12,6 +12,9 @@ import path from 'path';
 import os from 'os';
 
 const DEFAULT_CONFIG = {
+  // Assistant provider: 'claude' (default) or 'codex'
+  assistantProvider: 'claude',
+
   // Source to fetch from: 'bookmarks', 'likes', or 'both'
   source: 'bookmarks',
 
@@ -190,6 +193,9 @@ export function loadConfig(configPath) {
   };
 
   // Override with environment variables
+  if (process.env.ASSISTANT_PROVIDER) {
+    config.assistantProvider = process.env.ASSISTANT_PROVIDER;
+  }
   if (process.env.ARCHIVE_FILE) {
     config.archiveFile = process.env.ARCHIVE_FILE;
   }
@@ -262,6 +268,7 @@ export function loadConfig(configPath) {
  */
 export function initConfig(targetPath = './smaug.config.json') {
   const exampleConfig = {
+    assistantProvider: 'claude',
     // Source: 'bookmarks' (default), 'likes', or 'both'
     source: 'bookmarks',
     // EXPERIMENTAL: Include media attachments (photos, videos, GIFs)

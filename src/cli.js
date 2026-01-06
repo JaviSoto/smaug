@@ -312,6 +312,7 @@ async function main() {
 
       console.log('Smaug Status\n');
       console.log(`Archive:     ${config.archiveFile}`);
+      console.log(`Assistant:   ${config.assistantProvider || 'claude'}`);
       console.log(`Source:      ${config.source || 'bookmarks'}`);
       console.log(`Media:       ${config.includeMedia ? '✓ enabled (experimental)' : 'disabled (use --media to enable)'}`);
       console.log(`Twitter:     ${config.twitter?.authToken ? '✓ configured' : '✗ not configured'}`);
