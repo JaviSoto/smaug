@@ -23,6 +23,21 @@ import { fileURLToPath, pathToFileURL } from 'url';
 const args = process.argv.slice(2);
 const command = args[0];
 
+function resolveAssistantProvider(config) {
+  const raw = config?.assistantProvider;
+  if (raw === undefined || raw === null || raw === '') {
+    return 'claude';
+  }
+  const provider = String(raw).toLowerCase();
+  if (provider === 'claude') return 'claude';
+  if (provider === 'codex') return 'codex';
+  throw new Error(`Invalid assistantProvider '${raw}'. Expected 'claude' or 'codex'.`);
+}
+
+function assistantLabel(provider) {
+  return provider === 'codex' ? 'Codex' : 'Claude Code';
+}
+
 function prompt(question) {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -271,7 +286,13 @@ async function main() {
       if (result.count > 0) {
         console.log(`\n✓ Prepared ${result.count} tweets.`);
         console.log(`  Output: ${result.pendingFile}`);
-        console.log('\nNext: Run `npx smaug run` to process with Claude');
+        try {
+          const config = loadConfig();
+          const provider = resolveAssistantProvider(config);
+          console.log(`\nNext: Run \`npx smaug run\` to process with ${assistantLabel(provider)}`);
+        } catch {
+          console.log('\nNext: Run `npx smaug run` to process');
+        }
       } else {
         console.log('\nNo new tweets to process.');
       }
@@ -309,14 +330,20 @@ async function main() {
 
     case 'status': {
       const config = loadConfig();
+      const provider = resolveAssistantProvider(config);
 
       console.log('Smaug Status\n');
       console.log(`Archive:     ${config.archiveFile}`);
-      console.log(`Assistant:   ${config.assistantProvider || 'claude'}`);
+      console.log(`Assistant:   ${assistantLabel(provider)}`);
       console.log(`Source:      ${config.source || 'bookmarks'}`);
       console.log(`Media:       ${config.includeMedia ? '✓ enabled (experimental)' : 'disabled (use --media to enable)'}`);
       console.log(`Twitter:     ${config.twitter?.authToken ? '✓ configured' : '✗ not configured'}`);
-      console.log(`Auto-Claude: ${config.autoInvokeClaude ? 'enabled' : 'disabled'}`);
+      console.log(`Auto-run:    ${config.autoInvokeClaude ? 'enabled' : 'disabled'}`);
+      if (provider === 'codex') {
+        console.log(`Codex model: ${config.codexModel || '(default)'}`);
+      } else {
+        console.log(`Claude model:${config.claudeModel ? ` ${config.claudeModel}` : ' (default)'}`);
+      }
 
       if (fs.existsSync(config.pendingFile)) {
         const pending = JSON.parse(fs.readFileSync(config.pendingFile, 'utf8'));
@@ -347,7 +374,7 @@ async function main() {
 
 Commands:
   setup          Interactive setup wizard (start here!)
-  run            Run the full job (fetch + process with Claude)
+  run            Run the full job (fetch + process)
   run -t         Run with token usage tracking (--track-tokens)
   run --limit N  Process only N bookmarks (for large backlogs)
   fetch [n]      Fetch n tweets (default: 20)

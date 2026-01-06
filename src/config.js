@@ -13,7 +13,8 @@ import os from 'os';
 
 const DEFAULT_CONFIG = {
   // Assistant provider: 'claude' (default) or 'codex'
-  assistantProvider: 'claude',
+  // If unset, defaults to 'claude'.
+  assistantProvider: undefined,
 
   // Source to fetch from: 'bookmarks', 'likes', or 'both'
   source: 'bookmarks',
@@ -119,6 +120,9 @@ const DEFAULT_CONFIG = {
   // Claude invocation timeout in ms (default 15 min)
   claudeTimeout: 900000,
 
+  // Codex model to use (optional; uses Codex CLI default if unset)
+  codexModel: null,
+
   // Project root for Claude Code invocation
   projectRoot: null,
 
@@ -196,6 +200,9 @@ export function loadConfig(configPath) {
   if (process.env.ASSISTANT_PROVIDER) {
     config.assistantProvider = process.env.ASSISTANT_PROVIDER;
   }
+  if (process.env.CODEX_MODEL) {
+    config.codexModel = process.env.CODEX_MODEL;
+  }
   if (process.env.ARCHIVE_FILE) {
     config.archiveFile = process.env.ARCHIVE_FILE;
   }
@@ -268,6 +275,7 @@ export function loadConfig(configPath) {
  */
 export function initConfig(targetPath = './smaug.config.json') {
   const exampleConfig = {
+    // Assistant provider: 'claude' (default) or 'codex'
     assistantProvider: 'claude',
     // Source: 'bookmarks' (default), 'likes', or 'both'
     source: 'bookmarks',
@@ -310,6 +318,9 @@ export function initConfig(targetPath = './smaug.config.json') {
     autoInvokeClaude: true,
     claudeModel: 'sonnet',
     claudeTimeout: 900000,
+
+    // Codex model (optional; only used when assistantProvider is 'codex')
+    // codexModel: 'gpt-5.2-pro',
 
     // Notifications (optional)
     webhookUrl: null,

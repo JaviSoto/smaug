@@ -626,6 +626,7 @@ async function invokeCodex(config, bookmarkCount) {
     const args = [
       'exec',
       '--skip-git-repo-check',
+      ...(config.codexModel ? ['--model', config.codexModel] : []),
       '--',
       prompt
     ];
@@ -651,9 +652,18 @@ async function invokeCodex(config, bookmarkCount) {
 }
 
 function resolveAssistantProvider(config) {
-  const provider = (config.assistantProvider || 'claude').toLowerCase();
+  const raw = config.assistantProvider;
+  if (raw === undefined || raw === null || raw === '') {
+    return 'claude';
+  }
+
+  const provider = String(raw).toLowerCase();
+  if (provider === 'claude') return 'claude';
   if (provider === 'codex') return 'codex';
-  return 'claude';
+
+  throw new Error(
+    `Invalid assistantProvider '${raw}'. Expected 'claude' or 'codex'.`
+  );
 }
 
 // ============================================================================
@@ -794,7 +804,9 @@ export async function run(options = {}) {
     // Phase 2: Assistant analysis (if enabled)
     if (config.autoInvokeClaude !== false) {
       const provider = resolveAssistantProvider(config);
-      console.log(`[${now}] Phase 2: Invoking assistant (${provider}) for analysis...`);
+      console.log(
+        `[${now}] Phase 2: Invoking ${provider === 'codex' ? 'Codex' : 'Claude Code'} for analysis...`
+      );
 
       const assistantResult = provider === 'codex'
         ? await invokeCodex(config, bookmarkCount)
@@ -870,7 +882,9 @@ export async function run(options = {}) {
       }
     } else {
       // Auto-invoke disabled - just fetch
-      console.log(`[${now}] Assistant auto-invoke disabled. Run 'smaug process' (and invoke your assistant manually).`);
+      console.log(
+        `[${now}] Auto-invoke disabled. Run 'smaug process' to prepare pending bookmarks, then invoke Claude Code/Codex manually.`
+      );
 
       return {
         success: true,
