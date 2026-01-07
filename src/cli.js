@@ -237,9 +237,20 @@ async function main() {
         }
       }
 
+      // Parse --parallel flag (Codex only; ignored for Claude)
+      const parallelIdx = args.findIndex(a => a === '--parallel');
+      let codexParallelism = null;
+      if (parallelIdx !== -1 && args[parallelIdx + 1]) {
+        codexParallelism = parseInt(args[parallelIdx + 1], 10);
+        if (isNaN(codexParallelism) || codexParallelism <= 0) {
+          console.error('Invalid --parallel value. Must be a positive number.');
+          process.exit(1);
+        }
+      }
+
       try {
         const jobModule = await import(pathToFileURL(jobPath).href);
-        const result = await jobModule.default.run({ trackTokens, limit });
+        const result = await jobModule.default.run({ trackTokens, limit, codexParallelism });
         process.exit(result.success ? 0 : 1);
       } catch (err) {
         console.error('Failed to run job:', err.message);
@@ -378,6 +389,7 @@ Commands:
   run            Run the full job (fetch + process)
   run -t         Run with token usage tracking (--track-tokens)
   run --limit N  Process only N bookmarks (for large backlogs)
+  run --parallel N  Parallelize Codex calls (batch chunks)
   fetch [n]      Fetch n tweets (default: 20)
   fetch --all    Fetch ALL bookmarks (paginated)
   fetch --max-pages N  Limit pagination to N pages (default: 10)
@@ -391,6 +403,7 @@ Examples:
   smaug setup                    # First-time setup
   smaug run                      # Run full automation
   smaug run --limit 50           # Process 50 bookmarks at a time
+  smaug run --limit 100 --parallel 10  # Process 100 bookmarks via 10 parallel Codex calls
   smaug fetch                    # Fetch latest (uses config source)
   smaug fetch 50                 # Fetch 50 tweets
   smaug fetch --all              # Fetch ALL bookmarks (paginated)

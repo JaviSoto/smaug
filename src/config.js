@@ -127,6 +127,13 @@ const DEFAULT_CONFIG = {
   // Codex reasoning effort (low|medium|high). Lowest supported is "low".
   codexReasoningEffort: 'low',
 
+  // Codex parallelization (OpenAI API calls). When > 1, Smaug splits the batch
+  // into chunks and runs multiple requests concurrently.
+  codexParallelism: 1,
+
+  // Chunk size per Codex request when parallelizing.
+  codexChunkSize: 10,
+
   // Project root for Claude Code invocation
   projectRoot: null,
 
@@ -209,6 +216,18 @@ export function loadConfig(configPath) {
   }
   if (process.env.CODEX_REASONING_EFFORT) {
     config.codexReasoningEffort = process.env.CODEX_REASONING_EFFORT;
+  }
+  if (process.env.CODEX_PARALLELISM) {
+    const n = parseInt(process.env.CODEX_PARALLELISM, 10);
+    if (!isNaN(n) && n > 0) {
+      config.codexParallelism = n;
+    }
+  }
+  if (process.env.CODEX_CHUNK_SIZE) {
+    const n = parseInt(process.env.CODEX_CHUNK_SIZE, 10);
+    if (!isNaN(n) && n > 0) {
+      config.codexChunkSize = n;
+    }
   }
   if (process.env.ARCHIVE_FILE) {
     config.archiveFile = process.env.ARCHIVE_FILE;

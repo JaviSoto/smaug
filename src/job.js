@@ -658,63 +658,130 @@ async function invokeCodex(config, bookmarkCount) {
     },
   };
 
-  const payloadForModel = bookmarks.map((b) => ({
-    tweet_url: b.tweetUrl,
-    tweet_id: b.id,
-    date: b.date,
-    author_username: b.author,
-    author_name: b.authorName,
-    text: b.text,
-    links: (b.links || []).map((l) => ({
-      expanded: l.expanded,
-      type: l.type,
-      content: l.content
-        ? (l.type === 'github'
-          ? {
-            name: l.content.name,
-            fullName: l.content.fullName,
-            description: l.content.description,
-            stars: l.content.stars,
-            language: l.content.language,
-            topics: l.content.topics,
-            readme: (l.content.readme || '').slice(0, 2500),
-          }
-          : { text: (l.content.text || '').slice(0, 2500), paywalled: l.content.paywalled })
-        : null,
-    })),
-    reply_context: b.replyContext || null,
-    quote_context: b.quoteContext || null,
-  }));
+  const chunkSize = Math.max(1, Math.min(config.codexChunkSize || 10, bookmarkCount));
+  const parallelism = Math.max(1, Math.min(config.codexParallelism || 1, 50));
 
-  const inputText = [
-    'You are Smaug, a Twitter/X bookmarks archivist.',
-    '',
-    'Return STRICT JSON matching the provided schema. No markdown, no prose.',
-    'For each input bookmark, produce one entry. Keep titles short (<= 80 chars) and tags <= 8.',
-    'Only create notes for GitHub repos and articles; omit notes otherwise.',
-    '',
-    'Input bookmarks JSON:',
-    JSON.stringify(payloadForModel),
-  ].join('\n');
+  const chunks = [];
+  for (let i = 0; i < bookmarks.length; i += chunkSize) {
+    chunks.push(bookmarks.slice(i, i + chunkSize));
+  }
 
-  let modelResult;
+  async function mapWithConcurrency(items, concurrency, fn) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    let failed = null;
+
+    async function worker() {
+      while (true) {
+        if (failed) return;
+        const idx = nextIndex++;
+        if (idx >= items.length) return;
+        try {
+          results[idx] = await fn(items[idx], idx);
+        } catch (e) {
+          failed = e;
+          return;
+        }
+      }
+    }
+
+    const workers = [];
+    for (let i = 0; i < Math.min(concurrency, items.length); i++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+    if (failed) throw failed;
+    return results;
+  }
+
+  const model = config.codexModel || 'codex-mini-latest';
+  const reasoning = config.codexReasoningEffort || 'default';
+
+  let combinedEntries = [];
+  let combinedUsage = null;
+
   try {
-    console.log(`[${JOB_NAME}] OpenAI: requesting ${bookmarkCount} bookmark summary via model ${config.codexModel || 'codex-mini-latest'} (${config.codexReasoningEffort || 'default'} reasoning)`);
-    modelResult = await callCodexJson({
-      model: config.codexModel || 'codex-mini-latest',
-      reasoningEffort: config.codexReasoningEffort,
-      schema,
-      inputText,
-      maxOutputTokens: Math.min(12000, 1200 * Math.max(1, bookmarkCount)),
+    if (parallelism > 1 && chunks.length > 1) {
+      console.log(
+        `[${JOB_NAME}] OpenAI: requesting ${bookmarkCount} bookmark summaries via ${chunks.length} chunk(s) (size=${chunkSize}) @ parallel=${parallelism} using ${model} (${reasoning} reasoning)`
+      );
+    } else {
+      console.log(
+        `[${JOB_NAME}] OpenAI: requesting ${bookmarkCount} bookmark summary via model ${model} (${reasoning} reasoning)`
+      );
+    }
+
+    const results = await mapWithConcurrency(chunks, parallelism, async (chunk) => {
+      const payload = chunk.map((b) => ({
+        tweet_url: b.tweetUrl,
+        tweet_id: b.id,
+        date: b.date,
+        author_username: b.author,
+        author_name: b.authorName,
+        text: b.text,
+        links: (b.links || []).map((l) => ({
+          expanded: l.expanded,
+          type: l.type,
+          content: l.content
+            ? (l.type === 'github'
+              ? {
+                name: l.content.name,
+                fullName: l.content.fullName,
+                description: l.content.description,
+                stars: l.content.stars,
+                language: l.content.language,
+                topics: l.content.topics,
+                readme: (l.content.readme || '').slice(0, 2500),
+              }
+              : { text: (l.content.text || '').slice(0, 2500), paywalled: l.content.paywalled })
+            : null,
+        })),
+        reply_context: b.replyContext || null,
+        quote_context: b.quoteContext || null,
+      }));
+
+      const chunkInput = [
+        'You are Smaug, a Twitter/X bookmarks archivist.',
+        '',
+        'Return STRICT JSON matching the provided schema. No markdown, no prose.',
+        'For each input bookmark, produce one entry. Keep titles short (<= 80 chars) and tags <= 8.',
+        'Only create notes for GitHub repos and articles; omit notes otherwise.',
+        '',
+        'Input bookmarks JSON:',
+        JSON.stringify(payload),
+      ].join('\n');
+
+      return callCodexJson({
+        model,
+        reasoningEffort: config.codexReasoningEffort,
+        schema,
+        inputText: chunkInput,
+        maxOutputTokens: Math.min(12000, 1200 * Math.max(1, chunk.length)),
+      });
     });
+
+    for (const r of results) {
+      const entries = r.parsed?.entries;
+      if (!Array.isArray(entries)) {
+        throw new Error('Model output missing entries[]');
+      }
+      combinedEntries = combinedEntries.concat(entries);
+      combinedUsage = combinedUsage || r.usage || null;
+    }
+
     console.log(`[${JOB_NAME}] OpenAI: response received`);
   } catch (e) {
     return { success: false, error: e.message };
   }
 
-  const entries = modelResult.parsed?.entries;
-  if (!Array.isArray(entries)) {
-    return { success: false, error: 'Model output missing entries[]' };
+  // Ensure we got one entry per input bookmark.
+  const unique = new Set(bookmarks.map(b => b.tweetUrl));
+  const returned = new Set(combinedEntries.map(e => String(e.tweet_url || '').trim()).filter(Boolean));
+  if (returned.size !== unique.size) {
+    return {
+      success: false,
+      error: `Model returned ${returned.size} unique tweet_url(s) for ${unique.size} bookmark(s)`,
+    };
   }
 
   // Load archive once for de-dupe checks.
@@ -735,7 +802,7 @@ async function invokeCodex(config, bookmarkCount) {
     .replace(/(^-|-$)/g, '')
     .slice(0, 80) || 'note';
 
-  for (const entry of entries) {
+  for (const entry of combinedEntries) {
     const tweetUrl = String(entry.tweet_url || '').trim();
     if (!tweetUrl) return { success: false, error: 'Model entry missing tweet_url' };
     const src = byTweetUrl.get(tweetUrl);
@@ -829,7 +896,7 @@ async function invokeCodex(config, bookmarkCount) {
     }
   }
 
-  return { success: true, tokenUsage: modelResult.usage };
+  return { success: true, tokenUsage: combinedUsage };
 }
 
 function resolveAssistantProvider(config) {
@@ -918,6 +985,10 @@ export async function run(options = {}) {
   const startTime = Date.now();
   const now = new Date().toISOString();
   const config = loadConfig(options.configPath);
+
+  if (options.codexParallelism) {
+    config.codexParallelism = options.codexParallelism;
+  }
 
   console.log(`[${now}] Starting smaug job...`);
 
